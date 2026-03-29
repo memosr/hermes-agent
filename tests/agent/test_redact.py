@@ -201,3 +201,74 @@ class TestSecretCapturePayloadRedaction:
         text = '{"raw_secret": "ghp_abc123def456ghi789jkl"}'
         result = redact_sensitive_text(text)
         assert "abc123def456" not in result
+
+
+class TestMissingProviderKeys:
+    """Regression tests for provider keys previously not covered by redaction.
+
+    These keys were leaked in plain text to logs and tool output because
+    their prefixes were absent from _PREFIX_PATTERNS.
+    """
+
+    def test_elevenlabs_key_redacted(self):
+        """ElevenLabs TTS keys start with sk_ (underscore), not sk- (dash).
+        The existing sk- pattern did NOT catch these."""
+        text = "ELEVENLABS_API_KEY=sk_xxxxxxxx11labs0000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+
+    def test_elevenlabs_key_in_log_line(self):
+        """ElevenLabs key appearing inline in a log message."""
+        text = "Connecting to ElevenLabs with key sk_xxxxxxxx11labs0000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+        assert "sk_pro" in result  # prefix preserved for debuggability
+
+    def test_elevenlabs_key_not_confused_with_stripe(self):
+        """sk_live_ and sk_test_ (Stripe) are already covered — make sure
+        the new sk_ pattern doesn't double-match or break Stripe coverage."""
+        stripe_live = "sk_live_xxxxxxxxxxxxxxxxxxxxxxx"
+        stripe_test = "sk_test_xxxxxxxxxxxxxxxxxxxxxxx"
+        for key in [stripe_live, stripe_test]:
+            result = redact_sensitive_text(key)
+            assert "abc123def456" not in result
+
+    def test_tavily_key_redacted(self):
+        """Tavily search API keys use tvly- prefix."""
+        text = "TAVILY_API_KEY=tvly-FAKEKEY0000000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+
+    def test_tavily_key_in_log_line(self):
+        """Tavily key appearing inline in a log message."""
+        text = "Initialising Tavily client with tvly-FAKEKEY0000000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+        assert "tvly-a" in result  # prefix preserved
+
+    def test_exa_key_redacted(self):
+        """Exa search API keys use exa_ prefix."""
+        text = "EXA_API_KEY=exa_FAKEKEY00000000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+
+    def test_exa_key_in_log_line(self):
+        """Exa key appearing inline in a log message."""
+        text = "Using Exa client with key exa_FAKEKEY00000000000000000000"
+        result = redact_sensitive_text(text)
+        assert "abc123def456" not in result
+        assert "exa_ab" in result  # prefix preserved
+
+    def test_all_three_in_env_dump(self):
+        """Simulate printenv output containing all three previously-missed keys."""
+        env_dump = (
+            "HOME=/home/user\n"
+            "ELEVENLABS_API_KEY=sk_xxxxxxxx11labs0000000000000000\n"
+            "TAVILY_API_KEY=tvly-FAKEKEY0000000000000000000\n"
+            "EXA_API_KEY=exa_FAKEKEY00000000000000000000\n"
+            "SHELL=/bin/bash\n"
+        )
+        result = redact_sensitive_text(env_dump)
+        assert "abc123def456" not in result
+        assert "HOME=/home/user" in result
+        assert "SHELL=/bin/bash" in result
