@@ -36,22 +36,6 @@ brew install signal-cli
 # Extract and add to PATH
 ```
 
-### Alternative: Docker (signal-cli-rest-api)
-
-If you prefer Docker, use the [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) container:
-
-```bash
-docker run -d --name signal-cli \
-  -p 8080:8080 \
-  -v $HOME/.local/share/signal-cli:/home/.local/share/signal-cli \
-  -e MODE=json-rpc \
-  bbernhard/signal-cli-rest-api
-```
-
-:::tip
-Use `MODE=json-rpc` for best performance. The `normal` mode spawns a JVM per request and is much slower.
-:::
-
 ---
 
 ## Step 1: Link Your Signal Account
@@ -177,6 +161,19 @@ All phone numbers are automatically redacted in logs:
 - `+15551234567` → `+155****4567`
 - This applies to both Hermes gateway logs and the global redaction system
 
+### Note to Self (Single-Number Setup)
+
+If you run signal-cli as a **linked secondary device** on your own phone number (rather than a separate bot number), you can interact with Hermes through Signal's "Note to Self" feature.
+
+Just send a message to yourself from your phone — signal-cli picks it up and Hermes responds in the same conversation.
+
+**How it works:**
+- "Note to Self" messages arrive as `syncMessage.sentMessage` envelopes
+- The adapter detects when these are addressed to the bot's own account and processes them as regular inbound messages
+- Echo-back protection (sent-timestamp tracking) prevents infinite loops — the bot's own replies are filtered out automatically
+
+**No extra configuration needed.** This works automatically as long as `SIGNAL_ACCOUNT` matches your phone number.
+
 ### Health Monitoring
 
 The adapter monitors the SSE connection and automatically reconnects if:
@@ -221,4 +218,5 @@ The adapter monitors the SSE connection and automatically reconnects if:
 | `SIGNAL_ACCOUNT` | Yes | — | Bot phone number (E.164) |
 | `SIGNAL_ALLOWED_USERS` | No | — | Comma-separated phone numbers/UUIDs |
 | `SIGNAL_GROUP_ALLOWED_USERS` | No | — | Group IDs to monitor, or `*` for all (omit to disable groups) |
+| `SIGNAL_ALLOW_ALL_USERS` | No | `false` | Allow any user to interact (skip allowlist) |
 | `SIGNAL_HOME_CHANNEL` | No | — | Default delivery target for cron jobs |

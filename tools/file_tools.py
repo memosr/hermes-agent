@@ -4,13 +4,12 @@
 import errno
 import json
 import logging
-import os
 import threading
-from typing import Optional
 from tools.file_operations import ShellFileOperations
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
+
 
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
@@ -49,8 +48,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     from tools.terminal_tool import (
         _active_environments, _env_lock, _create_environment,
         _get_env_config, _last_activity, _start_cleanup_thread,
-        _check_disk_usage_warning,
-        _creation_locks, _creation_locks_lock,
+        _creation_locks,
+        _creation_locks_lock,
     )
     import time
 
@@ -172,8 +171,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # Security: block direct reads of internal Hermes cache/index files
         # to prevent prompt injection via catalog or hub metadata files.
         import pathlib as _pathlib
+        from hermes_constants import get_hermes_home as _get_hh
         _resolved = _pathlib.Path(path).expanduser().resolve()
-        _hermes_home = _pathlib.Path("~/.hermes").expanduser().resolve()
+        _hermes_home = _get_hh().resolve()
         _blocked_dirs = [
             _hermes_home / "skills" / ".hub" / "index-cache",
             _hermes_home / "skills" / ".hub",

@@ -1,5 +1,6 @@
 """Tests for Mattermost platform adapter."""
 import json
+import os
 import time
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -269,6 +270,7 @@ class TestMattermostWebSocketParsing:
     def setup_method(self):
         self.adapter = _make_adapter()
         self.adapter._bot_user_id = "bot_user_id"
+        self.adapter._bot_username = "hermes-bot"
         # Mock handle_message to capture the MessageEvent without processing
         self.adapter.handle_message = AsyncMock()
 
@@ -279,7 +281,7 @@ class TestMattermostWebSocketParsing:
             "id": "post_abc",
             "user_id": "user_123",
             "channel_id": "chan_456",
-            "message": "Hello from Matrix!",
+            "message": "@bot_user_id Hello from Matrix!",
         }
         event = {
             "event": "posted",
@@ -293,6 +295,7 @@ class TestMattermostWebSocketParsing:
         await self.adapter._handle_ws_event(event)
         assert self.adapter.handle_message.called
         msg_event = self.adapter.handle_message.call_args[0][0]
+        # @mention is stripped from the message text
         assert msg_event.text == "Hello from Matrix!"
         assert msg_event.message_id == "post_abc"
 
@@ -378,7 +381,7 @@ class TestMattermostWebSocketParsing:
             "id": "post_reply",
             "user_id": "user_123",
             "channel_id": "chan_456",
-            "message": "Thread reply",
+            "message": "@bot_user_id Thread reply",
             "root_id": "root_post_123",
         }
         event = {
@@ -408,6 +411,87 @@ class TestMattermostWebSocketParsing:
 
         await self.adapter._handle_ws_event(event)
         assert not self.adapter.handle_message.called
+
+
+# ---------------------------------------------------------------------------
+# Mention behavior (require_mention + free_response_channels)
+# ---------------------------------------------------------------------------
+
+class TestMattermostMentionBehavior:
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._bot_user_id = "bot_user_id"
+        self.adapter._bot_username = "hermes-bot"
+        self.adapter.handle_message = AsyncMock()
+
+    def _make_event(self, message, channel_type="O", channel_id="chan_456"):
+        post_data = {
+            "id": "post_mention",
+            "user_id": "user_123",
+            "channel_id": channel_id,
+            "message": message,
+        }
+        return {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": channel_type,
+                "sender_name": "@alice",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_require_mention_true_skips_without_mention(self):
+        """Default: messages without @mention in channels are skipped."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            os.environ.pop("MATTERMOST_FREE_RESPONSE_CHANNELS", None)
+            await self.adapter._handle_ws_event(self._make_event("hello"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_require_mention_false_responds_to_all(self):
+        """MATTERMOST_REQUIRE_MENTION=false: respond to all channel messages."""
+        with patch.dict(os.environ, {"MATTERMOST_REQUIRE_MENTION": "false"}):
+            await self.adapter._handle_ws_event(self._make_event("hello"))
+            assert self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_free_response_channel_responds_without_mention(self):
+        """Messages in free-response channels don't need @mention."""
+        with patch.dict(os.environ, {"MATTERMOST_FREE_RESPONSE_CHANNELS": "chan_456,chan_789"}):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("hello", channel_id="chan_456"))
+            assert self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_non_free_channel_still_requires_mention(self):
+        """Channels NOT in free-response list still require @mention."""
+        with patch.dict(os.environ, {"MATTERMOST_FREE_RESPONSE_CHANNELS": "chan_789"}):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("hello", channel_id="chan_456"))
+            assert not self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_dm_always_responds(self):
+        """DMs (channel_type=D) always respond regardless of mention settings."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(self._make_event("hello", channel_type="D"))
+            assert self.adapter.handle_message.called
+
+    @pytest.mark.asyncio
+    async def test_mention_stripped_from_text(self):
+        """@mention is stripped from message text."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MATTERMOST_REQUIRE_MENTION", None)
+            await self.adapter._handle_ws_event(
+                self._make_event("@hermes-bot what is 2+2")
+            )
+            assert self.adapter.handle_message.called
+            msg = self.adapter.handle_message.call_args[0][0]
+            assert "@hermes-bot" not in msg.text
+            assert "2+2" in msg.text
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +571,7 @@ class TestMattermostDedup:
             "id": "post_dup",
             "user_id": "user_123",
             "channel_id": "chan_456",
-            "message": "Hello!",
+            "message": "@bot_user_id Hello!",
         }
         event = {
             "event": "posted",
@@ -514,7 +598,7 @@ class TestMattermostDedup:
                 "id": pid,
                 "user_id": "user_123",
                 "channel_id": "chan_456",
-                "message": f"Message {i}",
+                "message": f"@bot_user_id Message {i}",
             }
             event = {
                 "event": "posted",
@@ -572,3 +656,102 @@ class TestMattermostRequirements:
         monkeypatch.delenv("MATTERMOST_URL", raising=False)
         from gateway.platforms.mattermost import check_mattermost_requirements
         assert check_mattermost_requirements() is False
+
+
+# ---------------------------------------------------------------------------
+# Media type propagation (MIME types, not bare strings)
+# ---------------------------------------------------------------------------
+
+class TestMattermostMediaTypes:
+    """Verify that media_types contains actual MIME types (e.g. 'image/png')
+    rather than bare category strings ('image'), so downstream
+    ``mtype.startswith("image/")`` checks in run.py work correctly."""
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+        self.adapter._bot_user_id = "bot_user_id"
+        self.adapter.handle_message = AsyncMock()
+
+    def _make_event(self, file_ids):
+        post_data = {
+            "id": "post_media",
+            "user_id": "user_123",
+            "channel_id": "chan_456",
+            "message": "@bot_user_id file attached",
+            "file_ids": file_ids,
+        }
+        return {
+            "event": "posted",
+            "data": {
+                "post": json.dumps(post_data),
+                "channel_type": "O",
+                "sender_name": "@alice",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_image_media_type_is_full_mime(self):
+        """An image attachment should produce 'image/png', not 'image'."""
+        file_info = {"name": "photo.png", "mime_type": "image/png"}
+        self.adapter._api_get = AsyncMock(return_value=file_info)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"\x89PNG fake")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        self.adapter._session = MagicMock()
+        self.adapter._session.get = MagicMock(return_value=mock_resp)
+
+        with patch("gateway.platforms.base.cache_image_from_bytes", return_value="/tmp/photo.png"):
+            await self.adapter._handle_ws_event(self._make_event(["file1"]))
+
+        msg = self.adapter.handle_message.call_args[0][0]
+        assert msg.media_types == ["image/png"]
+        assert msg.media_types[0].startswith("image/")
+
+    @pytest.mark.asyncio
+    async def test_audio_media_type_is_full_mime(self):
+        """An audio attachment should produce 'audio/ogg', not 'audio'."""
+        file_info = {"name": "voice.ogg", "mime_type": "audio/ogg"}
+        self.adapter._api_get = AsyncMock(return_value=file_info)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"OGG fake")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        self.adapter._session = MagicMock()
+        self.adapter._session.get = MagicMock(return_value=mock_resp)
+
+        with patch("gateway.platforms.base.cache_audio_from_bytes", return_value="/tmp/voice.ogg"), \
+             patch("gateway.platforms.base.cache_image_from_bytes"), \
+             patch("gateway.platforms.base.cache_document_from_bytes"):
+            await self.adapter._handle_ws_event(self._make_event(["file2"]))
+
+        msg = self.adapter.handle_message.call_args[0][0]
+        assert msg.media_types == ["audio/ogg"]
+        assert msg.media_types[0].startswith("audio/")
+
+    @pytest.mark.asyncio
+    async def test_document_media_type_is_full_mime(self):
+        """A document attachment should produce 'application/pdf', not 'document'."""
+        file_info = {"name": "report.pdf", "mime_type": "application/pdf"}
+        self.adapter._api_get = AsyncMock(return_value=file_info)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.read = AsyncMock(return_value=b"PDF fake")
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        self.adapter._session = MagicMock()
+        self.adapter._session.get = MagicMock(return_value=mock_resp)
+
+        with patch("gateway.platforms.base.cache_document_from_bytes", return_value="/tmp/report.pdf"), \
+             patch("gateway.platforms.base.cache_image_from_bytes"):
+            await self.adapter._handle_ws_event(self._make_event(["file3"]))
+
+        msg = self.adapter.handle_message.call_args[0][0]
+        assert msg.media_types == ["application/pdf"]
+        assert not msg.media_types[0].startswith("image/")
+        assert not msg.media_types[0].startswith("audio/")

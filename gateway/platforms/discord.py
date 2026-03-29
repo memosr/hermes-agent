@@ -20,7 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,8 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+import re
+
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -50,6 +52,8 @@ from gateway.platforms.base import (
     SendResult,
     cache_image_from_url,
     cache_audio_from_url,
+    cache_document_from_bytes,
+    SUPPORTED_DOCUMENT_TYPES,
 )
 
 
@@ -439,6 +443,10 @@ class DiscordAdapter(BasePlatformAdapter):
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
         self._bot_participated_threads: set = self._load_participated_threads()
+        # Persistent typing indicator loops per channel (DMs don't reliably
+        # show the standard typing gateway event for bots)
+        self._typing_tasks: Dict[str, asyncio.Task] = {}
+        self._bot_task: Optional[asyncio.Task] = None
         # Cap to prevent unbounded growth (Discord threads get archived).
         self._MAX_TRACKED_THREADS = 500
     
@@ -478,6 +486,17 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
         
         try:
+            # Acquire scoped lock to prevent duplicate bot token usage
+            from gateway.status import acquire_scoped_lock
+            self._token_lock_identity = self.config.token
+            acquired, existing = acquire_scoped_lock('discord-bot-token', self._token_lock_identity, metadata={'platform': 'discord'})
+            if not acquired:
+                owner_pid = existing.get('pid') if isinstance(existing, dict) else None
+                message = f'Discord bot token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
+                logger.error('[%s] %s', self.name, message)
+                self._set_fatal_error('discord_token_lock', message, retryable=False)
+                return False
+
             # Set up intents -- members intent needed for username-to-ID resolution
             intents = Intents.default()
             intents.message_content = True
@@ -524,6 +543,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 if message.author == self._client.user:
                     return
                 
+                # Ignore Discord system messages (thread renames, pins, member joins, etc.)
+                # Allow both default and reply types — replies have a distinct MessageType.
+                if message.type not in (discord.MessageType.default, discord.MessageType.reply):
+                    return
+                
                 # Bot message filtering (DISCORD_ALLOW_BOTS):
                 #   "none"     — ignore all other bots (default)
                 #   "mentions" — accept bot messages only when they @mention us
@@ -537,6 +561,22 @@ class DiscordAdapter(BasePlatformAdapter):
                             return
                     # "all" falls through to handle_message
                 
+                # If the message @mentions other users but NOT the bot, the
+                # sender is talking to someone else — stay silent.  Only
+                # applies in server channels; in DMs the user is always
+                # talking to the bot (mentions are just references).
+                # Controlled by DISCORD_IGNORE_NO_MENTION (default: true).
+                _ignore_no_mention = os.getenv(
+                    "DISCORD_IGNORE_NO_MENTION", "true"
+                ).lower() in ("true", "1", "yes")
+                if _ignore_no_mention and message.mentions and not isinstance(message.channel, discord.DMChannel):
+                    _bot_mentioned = (
+                        self._client.user is not None
+                        and self._client.user in message.mentions
+                    )
+                    if not _bot_mentioned:
+                        return  # Talking to someone else, don't interrupt
+
                 await self._handle_message(message)
 
             @self._client.event
@@ -576,7 +616,7 @@ class DiscordAdapter(BasePlatformAdapter):
             self._register_slash_commands()
             
             # Start the bot in background
-            asyncio.create_task(self._client.start(self.config.token))
+            self._bot_task = asyncio.create_task(self._client.start(self.config.token))
             
             # Wait for ready
             await asyncio.wait_for(self._ready_event.wait(), timeout=30)
@@ -609,6 +649,16 @@ class DiscordAdapter(BasePlatformAdapter):
         self._running = False
         self._client = None
         self._ready_event.clear()
+
+        # Release the token lock
+        try:
+            from gateway.status import release_scoped_lock
+            if getattr(self, '_token_lock_identity', None):
+                release_scoped_lock('discord-bot-token', self._token_lock_identity)
+                self._token_lock_identity = None
+        except Exception:
+            pass
+
         logger.info("[%s] Disconnected", self.name)
     
     async def send(
@@ -1239,14 +1289,48 @@ class DiscordAdapter(BasePlatformAdapter):
             return await super().send_document(chat_id, file_path, caption, file_name, reply_to, metadata=metadata)
     
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """Send typing indicator."""
-        if self._client:
+        """Start a persistent typing indicator for a channel.
+
+        Discord's TYPING_START gateway event is unreliable in DMs for bots.
+        Instead, start a background loop that hits the typing endpoint every
+        8 seconds (typing indicator lasts ~10s).  The loop is cancelled when
+        stop_typing() is called (after the response is sent).
+        """
+        if not self._client:
+            return
+        # Don't start a duplicate loop
+        if chat_id in self._typing_tasks:
+            return
+
+        async def _typing_loop() -> None:
             try:
-                channel = self._client.get_channel(int(chat_id))
-                if channel:
-                    await channel.typing()
-            except Exception:
-                pass  # Ignore typing indicator failures
+                while True:
+                    try:
+                        route = discord.http.Route(
+                            "POST", "/channels/{channel_id}/typing",
+                            channel_id=chat_id,
+                        )
+                        await self._client.http.request(route)
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as e:
+                        logger.debug("Discord typing indicator failed for %s: %s", chat_id, e)
+                        return
+                    await asyncio.sleep(8)
+            except asyncio.CancelledError:
+                pass
+
+        self._typing_tasks[chat_id] = asyncio.create_task(_typing_loop())
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Stop the persistent typing indicator for a channel."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
     
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a Discord channel."""
@@ -1366,15 +1450,23 @@ class DiscordAdapter(BasePlatformAdapter):
         command_text: str,
         followup_msg: str | None = None,
     ) -> None:
-        """Common handler for simple slash commands that dispatch a command string."""
+        """Common handler for simple slash commands that dispatch a command string.
+
+        Defers the interaction (shows "thinking..."), dispatches the command,
+        then cleans up the deferred response.  If *followup_msg* is provided
+        the "thinking..." indicator is replaced with that text; otherwise it
+        is deleted so the channel isn't cluttered.
+        """
         await interaction.response.defer(ephemeral=True)
         event = self._build_slash_event(interaction, command_text)
         await self.handle_message(event)
-        if followup_msg:
-            try:
-                await interaction.followup.send(followup_msg, ephemeral=True)
-            except Exception as e:
-                logger.debug("Discord followup failed: %s", e)
+        try:
+            if followup_msg:
+                await interaction.edit_original_response(content=followup_msg)
+            else:
+                await interaction.delete_original_response()
+        except Exception as e:
+            logger.debug("Discord interaction cleanup failed: %s", e)
 
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
@@ -1399,9 +1491,7 @@ class DiscordAdapter(BasePlatformAdapter):
         @tree.command(name="reasoning", description="Show or change reasoning effort")
         @discord.app_commands.describe(effort="Reasoning effort: xhigh, high, medium, low, minimal, or none.")
         async def slash_reasoning(interaction: discord.Interaction, effort: str = ""):
-            await interaction.response.defer(ephemeral=True)
-            event = self._build_slash_event(interaction, f"/reasoning {effort}".strip())
-            await self.handle_message(event)
+            await self._run_simple_slash(interaction, f"/reasoning {effort}".strip())
 
         @tree.command(name="personality", description="Set a personality")
         @discord.app_commands.describe(name="Personality name. Leave empty to list available.")
@@ -1474,9 +1564,7 @@ class DiscordAdapter(BasePlatformAdapter):
             discord.app_commands.Choice(name="status — show current mode", value="status"),
         ])
         async def slash_voice(interaction: discord.Interaction, mode: str = ""):
-            await interaction.response.defer(ephemeral=True)
-            event = self._build_slash_event(interaction, f"/voice {mode}".strip())
-            await self.handle_message(event)
+            await self._run_simple_slash(interaction, f"/voice {mode}".strip())
 
         @tree.command(name="update", description="Update Hermes Agent to the latest version")
         async def slash_update(interaction: discord.Interaction):
@@ -1500,7 +1588,17 @@ class DiscordAdapter(BasePlatformAdapter):
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
         is_dm = isinstance(interaction.channel, discord.DMChannel)
-        chat_type = "dm" if is_dm else "group"
+        is_thread = isinstance(interaction.channel, discord.Thread)
+        thread_id = None
+
+        if is_dm:
+            chat_type = "dm"
+        elif is_thread:
+            chat_type = "thread"
+            thread_id = str(interaction.channel_id)
+        else:
+            chat_type = "group"
+
         chat_name = ""
         if not is_dm and hasattr(interaction.channel, "name"):
             chat_name = interaction.channel.name
@@ -1516,6 +1614,7 @@ class DiscordAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=str(interaction.user.id),
             user_name=interaction.user.display_name,
+            thread_id=thread_id,
             chat_topic=chat_topic,
         )
 
@@ -1902,7 +2001,12 @@ class DiscordAdapter(BasePlatformAdapter):
                     elif att.content_type.startswith("audio/"):
                         msg_type = MessageType.AUDIO
                     else:
-                        msg_type = MessageType.DOCUMENT
+                        doc_ext = ""
+                        if att.filename:
+                            _, doc_ext = os.path.splitext(att.filename)
+                            doc_ext = doc_ext.lower()
+                        if doc_ext in SUPPORTED_DOCUMENT_TYPES:
+                            msg_type = MessageType.DOCUMENT
                     break
         
         # When auto-threading kicked in, route responses to the new thread
@@ -1939,6 +2043,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # vision tool can access them reliably (Discord CDN URLs can expire).
         media_urls = []
         media_types = []
+        pending_text_injection: Optional[str] = None
         for att in message.attachments:
             content_type = att.content_type or "unknown"
             if content_type.startswith("image/"):
@@ -1970,12 +2075,75 @@ class DiscordAdapter(BasePlatformAdapter):
                     media_urls.append(att.url)
                     media_types.append(content_type)
             else:
-                # Other attachments: keep the original URL
-                media_urls.append(att.url)
-                media_types.append(content_type)
+                # Document attachments: download, cache, and optionally inject text
+                ext = ""
+                if att.filename:
+                    _, ext = os.path.splitext(att.filename)
+                    ext = ext.lower()
+                if not ext and content_type:
+                    mime_to_ext = {v: k for k, v in SUPPORTED_DOCUMENT_TYPES.items()}
+                    ext = mime_to_ext.get(content_type, "")
+                if ext not in SUPPORTED_DOCUMENT_TYPES:
+                    logger.warning(
+                        "[Discord] Unsupported document type '%s' (%s), skipping",
+                        ext or "unknown", content_type,
+                    )
+                else:
+                    MAX_DOC_BYTES = 20 * 1024 * 1024
+                    if att.size and att.size > MAX_DOC_BYTES:
+                        logger.warning(
+                            "[Discord] Document too large (%s bytes), skipping: %s",
+                            att.size, att.filename,
+                        )
+                    else:
+                        try:
+                            import aiohttp
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(
+                                    att.url,
+                                    timeout=aiohttp.ClientTimeout(total=30),
+                                ) as resp:
+                                    if resp.status != 200:
+                                        raise Exception(f"HTTP {resp.status}")
+                                    raw_bytes = await resp.read()
+                            cached_path = cache_document_from_bytes(
+                                raw_bytes, att.filename or f"document{ext}"
+                            )
+                            doc_mime = SUPPORTED_DOCUMENT_TYPES[ext]
+                            media_urls.append(cached_path)
+                            media_types.append(doc_mime)
+                            logger.info("[Discord] Cached user document: %s", cached_path)
+                            # Inject text content for .txt/.md files (capped at 100 KB)
+                            MAX_TEXT_INJECT_BYTES = 100 * 1024
+                            if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                                try:
+                                    text_content = raw_bytes.decode("utf-8")
+                                    display_name = att.filename or f"document{ext}"
+                                    display_name = re.sub(r'[^\w.\- ]', '_', display_name)
+                                    injection = f"[Content of {display_name}]:\n{text_content}"
+                                    if pending_text_injection:
+                                        pending_text_injection = f"{pending_text_injection}\n\n{injection}"
+                                    else:
+                                        pending_text_injection = injection
+                                except UnicodeDecodeError:
+                                    pass
+                        except Exception as e:
+                            logger.warning(
+                                "[Discord] Failed to cache document %s: %s",
+                                att.filename, e, exc_info=True,
+                            )
         
+        event_text = message.content
+        if pending_text_injection:
+            event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
+
+        # Defense-in-depth: prevent empty user messages from entering session
+        # (can happen when user sends @mention-only with no other text)
+        if not event_text or not event_text.strip():
+            event_text = "(The user sent a message with no text content)"
+
         event = MessageEvent(
-            text=message.content,
+            text=event_text,
             message_type=msg_type,
             source=source,
             raw_message=message,
