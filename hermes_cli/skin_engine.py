@@ -101,6 +101,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from hermes_constants import get_hermes_home
+
 logger = logging.getLogger(__name__)
 
 
@@ -500,6 +502,71 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [#F29C38]⠀⠀⠀⠀⠀⠀⠀⣼⡟⠀⠀⢻⣧⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [dim #7A3511]⠀⠀⠀⠀⠀⠀⠀tail flame lit⠀⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
+    "prometheus": {
+        "name": "prometheus",
+        "description": "Titan theme — violet night and stolen fire",
+        "colors": {
+            "banner_border":   "#6B21A8",
+            "banner_title":    "#FCA311",
+            "banner_accent":   "#F97316",
+            "banner_dim":      "#3B1573",
+            "banner_text":     "#FEF3C7",
+            "ui_accent":       "#F97316",
+            "ui_label":        "#FCA311",
+            "ui_ok":           "#22C55E",
+            "ui_error":        "#EF4444",
+            "ui_warn":         "#F97316",
+            "prompt":          "#FEF3C7",
+            "input_rule":      "#6B21A8",
+            "response_border": "#FCA311",
+            "session_label":   "#FCA311",
+            "session_border":  "#5B3A8F",
+        },
+        "spinner": {
+            "waiting_faces": ["(🔥)", "(⚡)", "(∴)", "(♦)", "(◈)"],
+            "thinking_faces": ["(🔥)", "(⚡)", "(∴)", "(◈)", "(♦)"],
+            "thinking_verbs": [
+                "stealing fire", "breaking chains", "igniting the core",
+                "forging the spark", "defying the summit", "carrying the flame",
+                "reading the lightning", "enduring the eagle",
+            ],
+            "wings": [
+                ["⟪🔥", "🔥⟫"],
+                ["⟪⚡", "⚡⟫"],
+                ["⟪∴", "∴⟫"],
+                ["⟪◈", "◈⟫"],
+            ],
+        },
+        "branding": {
+            "agent_name": "Prometheus Agent",
+            "welcome": "Welcome to Prometheus Agent! Type your message or /help for commands.",
+            "goodbye": "The fire is yours. 🔥",
+            "response_label": " 🔥 Prometheus ",
+            "prompt_symbol": "🔥 ❯ ",
+            "help_header": "(🔥) Available Commands",
+        },
+        "tool_prefix": "│",
+        "banner_logo": """[bold #FEF3C7]██████╗ ██████╗  ██████╗ ███╗   ███╗███████╗████████╗██╗  ██╗███████╗██╗   ██╗███████╗[/]
+[bold #FCA311]██╔══██╗██╔══██╗██╔═══██╗████╗ ████║██╔════╝╚══██╔══╝██║  ██║██╔════╝██║   ██║██╔════╝[/]
+[#F97316]██████╔╝██████╔╝██║   ██║██╔████╔██║█████╗     ██║   ███████║█████╗  ██║   ██║███████╗[/]
+[#E8630A]██╔═══╝ ██╔══██╗██║   ██║██║╚██╔╝██║██╔══╝     ██║   ██╔══██║██╔══╝  ██║   ██║╚════██║[/]
+[#6B21A8]██║     ██║  ██║╚██████╔╝██║ ╚═╝ ██║███████╗   ██║   ██║  ██║███████╗╚██████╔╝███████║[/]
+[#3B1573]╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚══════╝[/]""",
+        "banner_hero": """[#6B21A8]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⣤⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀[/]
+[#8B31CC]⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⡿⠿⠛⠋⠉⠉⠛⠿⣷⣄⠀⠀⠀⠀⠀[/]
+[#FCA311]⠀⠀⠀⠀⠀⠀⣴⣿⠟⠁⠀⠀⠀🔥⠀⠀⠀⠈⠻⣿⣦⠀⠀⠀⠀[/]
+[#FCA311]⠀⠀⠀⠀⠀⣼⡿⠃⠀⠀⠀⠀⣾⣿⣷⠀⠀⠀⠀⠘⢿⣧⠀⠀⠀[/]
+[#F97316]⠀⠀⠀⠀⢰⣿⠁⠀⠀⠀⢀⣼⡿⠋⢿⣷⡀⠀⠀⠀⠈⣿⡆⠀⠀[/]
+[#F97316]⠀⠀⠀⠀⣿⡇⠀⠀⠀⢠⣿⠟⠀⚡⠀⠻⣿⡄⠀⠀⠀⢸⣿⠀⠀[/]
+[#E8630A]⠀⠀⠀⠀⣿⡇⠀⠀⢀⣿⡏⠀⠀⠀⠀⠀⢹⣿⡀⠀⠀⢸⣿⠀⠀[/]
+[#6B21A8]⠀⠀⠀━⣿⡇━━━⣿⣿━━━━━━━⣿⣿━━━⢸⣿━━[/]
+[#6B21A8]⠀⠀⠀⠀⢿⣧⠀⠀⠀⠻⣿⣄⠀⠀⠀⣠⣿⠟⠀⠀⠀⣼⡿⠀⠀[/]
+[#3B1573]⠀⠀⠀⠀⠈⢿⣷⣄⠀⠀⠈⠻⣿⣶⣾⡿⠋⠀⠀⠀⣠⣾⡿⠀⠀[/]
+[#3B1573]⠀⠀⠀⠀⠀⠀⠙⠿⣿⣶⣤⣀⣈⣉⣁⣀⣤⣶⣿⠿⠋⠀⠀⠀[/]
+[#FCA311]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠿⠿⠿⠛⠋⠁⠀⠀⠀⠀⠀⠀[/]
+[#F97316]⠀⠀⠀⠀⠀⠀⠀⠀🔥⠀⠀⠀⠀⠀⠀⠀🔥⠀⠀⠀⠀⠀⠀[/]
+[dim #3B1573]⠀⠀⠀⠀⠀⠀⠀fire given to all⠀⠀⠀⠀⠀⠀⠀[/]""",
+    },
 }
 
 
@@ -513,8 +580,7 @@ _active_skin_name: str = "default"
 
 def _skins_dir() -> Path:
     """User skins directory."""
-    home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-    return home / "skins"
+    return get_hermes_home() / "skins"
 
 
 def _load_skin_from_yaml(path: Path) -> Optional[Dict[str, Any]]:
