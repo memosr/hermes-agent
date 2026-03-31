@@ -621,6 +621,14 @@ class WeComAdapter(BasePlatformAdapter):
             return None
 
         try:
+            from tools.url_safety import is_safe_url
+            if not is_safe_url(url):
+                logger.warning("[%s] Blocked unsafe WeCom media URL: %s", self.name, url)
+                return None
+        except ImportError:
+            pass
+
+        try:
             raw, headers = await self._download_remote_bytes(url, max_bytes=ABSOLUTE_MAX_BYTES)
         except Exception as exc:
             logger.debug("[%s] Failed to download %s from %s: %s", self.name, kind, url, exc)
