@@ -735,6 +735,21 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
     profiles_root = _get_profiles_root()
     profiles_root.mkdir(parents=True, exist_ok=True)
 
+    # Guard against zip-slip: validate all member paths before extracting.
+    # A malicious archive could contain entries like '../../.ssh/authorized_keys'
+    # that would escape the profiles root directory.
+    import tarfile as _tarfile
+    with _tarfile.open(str(archive), 'r:gz') as _tf:
+        profiles_root_resolved = profiles_root.resolve()
+        for member in _tf.getmembers():
+            member_path = (profiles_root / member.name).resolve()
+            try:
+                member_path.relative_to(profiles_root_resolved)
+            except ValueError:
+                raise ValueError(
+                    f"Archive contains unsafe path: {member.name}. "
+                    f"Refusing to extract.")
+
     shutil.unpack_archive(str(archive), str(profiles_root))
 
     # If the archive extracted under a different name, rename
