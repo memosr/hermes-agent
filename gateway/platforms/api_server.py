@@ -1003,6 +1003,12 @@ class APIServerAdapter(BasePlatformAdapter):
             skills = body.get("skills")
             repeat = body.get("repeat")
 
+            existing_jobs = self._cron_list()
+            if len(existing_jobs) >= 100:
+                return web.json_response(
+                    {"error": "Job limit reached. Maximum 100 cron jobs allowed."},
+                    status=400,
+                )
             if not name:
                 return web.json_response({"error": "Name is required"}, status=400)
             if len(name) > self._MAX_NAME_LENGTH:
