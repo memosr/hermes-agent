@@ -520,6 +520,18 @@ class APIServerAdapter(BasePlatformAdapter):
         # When provided, history is loaded from state.db instead of from the request body.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
+            # Validate session ID format to prevent injection and session hijacking.
+            # Only accept well-formed UUIDs (the format Hermes generates internally).
+            import re as _re
+            _UUID_RE = _re.compile(
+                r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                _re.IGNORECASE,
+            )
+            if not _UUID_RE.match(provided_session_id):
+                return web.json_response(
+                    _openai_error("Invalid X-Hermes-Session-Id format.", code="invalid_session_id"),
+                    status=400,
+                )
             session_id = provided_session_id
             try:
                 db = self._ensure_session_db()
