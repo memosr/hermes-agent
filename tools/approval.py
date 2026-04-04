@@ -475,7 +475,10 @@ def _smart_approve(command: str, description: str) -> str:
 
         prompt = f"""You are a security reviewer for an AI coding agent. A terminal command was flagged by pattern matching as potentially dangerous.
 
-Command: {command}
+Command:
+```
+{command}
+```
 Flagged reason: {description}
 
 Assess the ACTUAL risk of this command. Many flagged commands are false positives — for example, `python -c "print('hello')"` is flagged as "script execution via -c flag" but is completely harmless.
