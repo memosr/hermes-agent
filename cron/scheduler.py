@@ -257,6 +257,12 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             return False, f"Script path escapes the scripts directory: {script_path!r}"
     else:
         path = path.resolve()
+        # Restrict absolute paths to HERMES_HOME to prevent
+        # arbitrary file execution outside the user's data directory.
+        try:
+            path.relative_to(get_hermes_home().resolve())
+        except ValueError:
+            return False, f"Absolute script path must be inside HERMES_HOME: {script_path!r}"
 
     if not path.exists():
         return False, f"Script not found: {path}"
