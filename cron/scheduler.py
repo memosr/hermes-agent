@@ -479,7 +479,20 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 "requested": job.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER"),
             }
             if job.get("base_url"):
-                runtime_kwargs["explicit_base_url"] = job.get("base_url")
+                _job_base_url = job.get("base_url")
+                try:
+                    from tools.url_safety import is_safe_url
+                    if not is_safe_url(_job_base_url):
+                        logger.warning(
+                            "Cron job %s base_url resolves to a private/internal "
+                            "address — ignoring to prevent SSRF.",
+                            job.get("id", "?"),
+                        )
+                        _job_base_url = None
+                except ImportError:
+                    pass
+                if _job_base_url:
+                    runtime_kwargs["explicit_base_url"] = _job_base_url
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except Exception as exc:
             message = format_runtime_provider_error(exc)
