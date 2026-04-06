@@ -20,18 +20,44 @@ Environment:
 """
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import sys
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional, Tuple
 
-RPC_URL = os.environ.get(
+
+def _validate_rpc_url(url: str) -> str:
+    """Validate RPC URL to prevent SSRF attacks.
+
+    - Only http/https schemes are allowed.
+    - Private, loopback, link-local, and multicast addresses are rejected.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        sys.exit(f"Invalid RPC URL scheme '{parsed.scheme}': only http/https are allowed.")
+    hostname = parsed.hostname
+    if not hostname:
+        sys.exit("Invalid RPC URL: missing hostname.")
+    try:
+        addr = ipaddress.ip_address(hostname)
+        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast:
+            sys.exit(f"Blocked RPC URL: '{hostname}' resolves to a disallowed IP range.")
+    except ValueError:
+        # hostname is a domain name — allowed
+        pass
+    return url
+
+
+RPC_URL = _validate_rpc_url(os.environ.get(
     "BASE_RPC_URL",
     "https://mainnet.base.org",
-)
+))
 
 WEI_PER_ETH = 10**18
 GWEI = 10**9
@@ -211,8 +237,16 @@ def _short_addr(addr: str) -> str:
 # ABI encoding / decoding helpers
 # ---------------------------------------------------------------------------
 
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
 def _encode_address(addr: str) -> str:
-    """ABI-encode an address as a 32-byte hex string (no 0x prefix)."""
+    """ABI-encode an address as a 32-byte hex string (no 0x prefix).
+
+    Raises ValueError if *addr* is not a valid Ethereum address.
+    """
+    if not _ETH_ADDRESS_RE.match(addr):
+        raise ValueError(f"Invalid Ethereum address: {addr!r}")
     clean = addr.lower().replace("0x", "")
     return clean.zfill(64)
 
@@ -274,10 +308,11 @@ def fetch_prices(addresses: List[str], max_lookups: int = 20) -> Dict[str, float
     """
     prices: Dict[str, float] = {}
     for i, addr in enumerate(addresses[:max_lookups]):
-        url = (
-            f"https://api.coingecko.com/api/v3/simple/token_price/base"
-            f"?contract_addresses={addr}&vs_currencies=usd"
-        )
+        params = urllib.parse.urlencode({
+            "contract_addresses": addr,
+            "vs_currencies": "usd",
+        })
+        url = f"https://api.coingecko.com/api/v3/simple/token_price/base?{params}"
         data = _http_get_json(url, timeout=10)
         if data and isinstance(data, dict):
             for key, info in data.items():
