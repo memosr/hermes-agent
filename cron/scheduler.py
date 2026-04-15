@@ -39,6 +39,19 @@ from hermes_time import now as _hermes_now
 
 logger = logging.getLogger(__name__)
 
+# SSRF protection for job-specified base_url overrides.
+# Fail-closed: if url_safety cannot be loaded, no job may supply a custom base_url.
+_job_base_url: Optional[str] = None
+try:
+    from tools.url_safety import is_safe_url as _is_safe_url
+except ImportError:
+    logger.error(
+        "tools.url_safety could not be imported; job base_url overrides are "
+        "disabled (fail-closed SSRF protection)"
+    )
+    _is_safe_url = None  # type: ignore[assignment]
+    _job_base_url = None
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -689,7 +702,19 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 "requested": job.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER"),
             }
             if job.get("base_url"):
-                runtime_kwargs["explicit_base_url"] = job.get("base_url")
+                _candidate_url = job["base_url"]
+                if _is_safe_url is not None and _is_safe_url(_candidate_url):
+                    runtime_kwargs["explicit_base_url"] = _candidate_url
+                else:
+                    _reason = (
+                        "SSRF validation module unavailable"
+                        if _is_safe_url is None
+                        else "URL failed SSRF safety check"
+                    )
+                    logger.warning(
+                        "Job '%s': ignoring base_url %r — %s",
+                        job_id, _candidate_url, _reason,
+                    )
             runtime = resolve_runtime_provider(**runtime_kwargs)
         except Exception as exc:
             message = format_runtime_provider_error(exc)
