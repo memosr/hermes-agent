@@ -4577,7 +4577,11 @@ def _(rid, params: dict) -> dict:
                 rid, 4005, f"blocked: {desc}. Use the agent for dangerous commands."
             )
     except ImportError:
-        pass
+        # Fail-closed: if the dangerous-command guard cannot be loaded,
+        # refuse to run the command rather than silently bypassing the check.
+        return _err(
+            rid, 4006, "dangerous-command guard unavailable; refusing to execute"
+        )
     try:
         r = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
